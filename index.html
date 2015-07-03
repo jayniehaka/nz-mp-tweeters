@@ -57,13 +57,15 @@
 
   <script type="text/javascript">
 
-    var width = 800,
-        height = 700;
+    var width = 1000,
+        height = 800;
 
     var force = d3.layout.force()
-        .charge(-500)
+        .charge(-800)
         //.linkDistance(300)
-        .linkStrength(0.1)
+        //.friction(0.3)
+        .linkStrength(0.03)
+        .gravity(.3)
         .size([width, height]);
 
     var div = d3.select("body").append("div")
