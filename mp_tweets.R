@@ -1,24 +1,52 @@
-make_nodes_table <- function(consumer_key, consumer_secret) {
+# function for setting up oauth
+setup_sig <- function(consumer_key, consumer_secret, access_token, access_token_secret) {
+  mpsapp <- oauth_app("twitter", consumer_key, consumer_secret)
+  sig <- sign_oauth1.0(mpsapp, token=access_token, token_secret=access_token_secret)
+  sig
+}
+
+# function to get user list
+get_list <- function(list_name, list_owner, signature) {
+  api_url <- paste("https://api.twitter.com/1.1/lists/members.json?slug=",
+                   list_name, "&owner_screen_name=", list_owner, "&count=5000", sep="")
+  response <- GET(api_url, signature)
+  response_list <- fromJSON(content(response, as = "text", encoding = "UTF-8"))
+}
+
+# function to get list of friends (people you follow)
+get_friends <- function(id, signature) {
+  friends_url <- paste("https://api.twitter.com/1.1/friends/ids.json?cursor=-1&user_id=", id, "&count=5000", sep="")
+  friends_response <- GET(friends_url, signature)
+  friends_list <- fromJSON(content(friends_response, as = "text", encoding = "UTF-8"))
+  if (friends_response$status_code == 200) {
+    friends_list$ids
+  } else {
+    print(paste("Error: ", friends_response$headers$status))
+  }
+}
+
+# function to get rate limit info
+friends_requests_remaining <- function(signature) {
+  rate_limit_url <- "https://api.twitter.com/1.1/application/rate_limit_status.json?resources=friends"
+  rate_limit_response <- GET(rate_limit_url, signature)
+  rate_limit_list <- fromJSON(content(rate_limit_response, as = "text", encoding = "UTF-8"))
+  rate_limit_list$resources$friends$`/friends/ids`$remaining
+}
+
+make_nodes_table <- function(consumer_key, consumer_secret, access_token, access_token_secret) {
 	library(httr)
+  library(jsonlite)
+  
+  sig <- setup_sig(consumer_key, consumer_secret, access_token, access_token_secret)
 	
-	list_name <- 'mps'
-	list_owner <- 'nzparliament'
+	# get the nz mps list
+  mps_list <- get_list('mps', 'nzparliament', sig)
 	
-	setup_twitter_oauth(consumer_key, consumer_secret)
-	
-	# get list
-	api.url <- paste("https://api.twitter.com/1.1/lists/members.json?slug=",
-		list_name, "&owner_screen_name=", list_owner, "&count=5000", sep="")
-	response <- GET(api.url, config(token=twitteR:::get_oauth_sig()))
-	response.list <- fromJSON(content(response, as = "text", encoding = "UTF-8"))
-	
-	# get member info
-	name <- sapply(response.list$users, function(i) i$name)
-	screenname <- sapply(response.list$users, function(i) i$screen_name)
-	desc <- sapply(response.list$users, function(i) i$description)
-	id <- sapply(response.list$users, function(i) i$id_str)
-	
-	# make nodes dataframe
+  # make mps dataframe
+	name <- mps_list$users$name
+	screenname <- mps_list$users$screen_name
+	desc <- mps_list$users$description
+	id <- mps_list$users$id_str
 	mps <- cbind(id, screenname, name, desc)
 	mps <- data.frame(mps)
 	# add zero-based index for D3
@@ -34,44 +62,45 @@ make_nodes_table <- function(consumer_key, consumer_secret) {
 	
 	# write to csv then manually add the missing parties
 	write.csv(mps, "nodes_table.csv", row.names = FALSE)
+	
 	print('All finished!')
 }
 
-make_edges_table <- function(file, consumer_key, consumer_secret) {
-	library(twitteR)
-	
-	setup_twitter_oauth(consumer_key, consumer_secret)
+make_edges_table <- function(file, consumer_key, consumer_secret, access_token, access_token_secret) {
+  library(httr)
+  library(jsonlite)
+  
+  sig <- setup_sig(consumer_key, consumer_secret, access_token, access_token_secret)
 	
 	# import nodes csv once party column has been manually added
-	mps <- read.csv(file, colClasses=c("numeric",rep("character",5)))
+  mps <- read.csv(file, stringsAsFactors = FALSE, colClasses = c("numeric", rep("character",5)))
 
 	# set up edges data frame
 	edges <- data.frame(source=character(), target=character())
 	
 	# loop through mps
-	# "friend" is someone you follow
 	for (mpid in mps$id) {
-		mp <- getUser(mpid)					# get user object for the MP
-		friends <- mp$getFriendIDs()		# get list of friends' IDs
-		source <- mpid						# set MP as source node
-		for (friendid in friends) {			# loop through friends
-			if (friendid %in% mps$id) {		# check if friend is an MP
-				target <- friendid			# set friend as target node
+	  
+	  print(paste('Getting friends of MP',mpid))
+	  
+	  # sleep if I'm running out of requests
+	  while (friends_requests_remaining(sig) < 1) {
+	    print('Sleeping for 1 minute.')
+	    Sys.sleep(60)
+	  }
+	  
+	  friends <- get_friends(mpid, sig)		# get list of friends' IDs
+		source <- mpid					          	# set MP as source node
+		for (friendid in friends) {	  	  	# loop through friends
+			if (friendid %in% mps$id) {	    	# check if friend is an MP
+				target <- as.character(friendid)		    	# set friend as target node
 				edge <- data.frame(source, target, stringsAsFactors=FALSE)	# create edge
 				edges <- rbind(edges, edge)	# add to edges data frame
 			}
 		}
+	  
 		# sleep so I don't get rate limited
-		print(paste('Got',mpid))
-		remaining <- getCurRateLimitInfo()[53,3]
-		print(paste('Requests remaining:',remaining))
-		print('Sleeping for 1 minute.')
-		Sys.sleep(60)
-		
-		# keep sleeping if I'm running out of requests
-		while (getCurRateLimitInfo()[53,3] < 1) {
-			Sys.sleep(60)
-		}
+		print(paste('Requests remaining:', friends_requests_remaining(sig)))
 	}
 	
 	colnames(edges) <- c("source","target")
@@ -86,8 +115,8 @@ write_to_json <- function(nodes_file, edges_file) {
 	library(jsonlite)
 	
 	# read the nodes and edges files to DFs
-	nodes <- read.csv(nodes_file, colClasses=c("numeric",rep("character",5)))
-	edges <- edges <- read.csv(edges_file)
+	nodes <- read.csv(nodes_file)
+	edges <- read.csv(edges_file)
 	
 	# make sure nodes are in order of index
 	nodes <- nodes[order(nodes$index),]
@@ -95,10 +124,10 @@ write_to_json <- function(nodes_file, edges_file) {
 	# replace Twitter IDs with index
 	edges$source <- nodes$index[match(edges$source,nodes$id)]
 	edges$target <- nodes$index[match(edges$target,nodes$id)]
-	
+
 	# convert to json and write to file
 	edges_json <- toJSON(edges, pretty=TRUE)
-	nodes_json <- toJSON(mps, pretty=TRUE)
+	nodes_json <- toJSON(nodes, pretty=TRUE)
 	
 	json <- paste("{\"nodes\": ", nodes_json, ", \"links\":", edges_json, "}", sep=" ")
 	
